@@ -929,7 +929,7 @@ export function buildWalletAgentTools(deps: {
   const walletTokenSellOrders = tool(
     'wallet_token_sell_orders',
     [
-      'Verify an MVC FT TokenSell listing (sell order) from its listing tuple — TokenSell has NO chain-wide order index: the listing {sell_txid, sell_output_index, sell_price_sats, seller_address} travels off-chain between counterparties.',
+      'Verify a TokenSell listing tuple you were given — NOT order discovery: TokenSell has NO chain-wide order index, so the listing {sell_txid, sell_output_index, sell_price_sats, seller_address} travels off-chain between counterparties.',
       'Given a tuple, this fetches the LIST tx, recomputes its v10 consensus txid, decodes the TokenSell seed lock back into (seller, price) and cross-checks the claims — a counterparty cannot misquote a listing.',
       'Use before wallet_token_take to validate what you are about to buy; use the wallet_token_sell output to obtain your own listing tuple.',
       'Read-only public chain data. No arguments = explanation of the discovery model.',
@@ -971,7 +971,7 @@ export function buildWalletAgentTools(deps: {
           verified.verified ? 'Listing VERIFIED against the chain.' : 'Listing FAILED verification:',
           `- LIST txid: ${verified.txid} (v10 consensus recomputation)`,
           `- on-chain price: ${verified.decoded.priceSats} sats (${(Number(verified.decoded.priceSats) / SATOSHI_PER_UNIT).toFixed(8)} SPACE)`,
-          `- seller hash160 (from seed lock): ${verified.decoded.sellerHash160Hex}`,
+          `- seller address (decoded from seed lock): ${verified.decoded.sellerAddress || verified.decoded.sellerHash160Hex + ' (hash160; base58 decode unavailable)'}`,
           `- token amount listed: ${verified.tokenAmount || 'unknown'}`,
           `- sale output: ${verified.sellSats} sats at out${listing.sell_output_index}`,
         ];
@@ -1029,6 +1029,9 @@ export function buildWalletAgentTools(deps: {
         }
         priceSats = Math.round(space * SATOSHI_PER_UNIT);
       }
+      if (priceSats < 22000) {
+        return textResult('wallet_token_sell: ask price below the 22000 sats floor (mirrors wallet_nft_sell) — raise the ask price.', true);
+      }
       const tokenTxid = asString(args.token_txid).toLowerCase();
       if (tokenTxid && !/^[0-9a-f]{64}$/.test(tokenTxid)) {
         return textResult('wallet_token_sell: token_txid must be 64 hex.', true);
@@ -1061,15 +1064,14 @@ export function buildWalletAgentTools(deps: {
     }
   );
 
-  const walletTokenTake = tool(
-    'wallet_token_take',
-    [
-      'Take an MVC FT TokenSell listing (op=2 UNLOCK_FROM_CONTRACT) with THIS session MetaBot\'s own wallet: pays the ask price to the seller and receives the tokens at the receiver address.',
+  const tokenTakeDescription = [
+      'Take (buy) an MVC FT TokenSell listing (op=2 UNLOCK_FROM_CONTRACT) with THIS session MetaBot\'s own wallet: pays the ask price to the seller and receives the tokens at the receiver address.',
+      'Verb-aligned with wallet_nft_buy so an agent switching between the NFT and FT lines keeps one verb; wallet_token_take stays registered as an alias with identical behavior (docs map take↔buy).',
       'Pass the listing tuple (sell_txid + sell_output_index + sell_price_sats + seller_address; the price/seller are cross-checked against the on-chain seed lock before signing). Verify the listing first with wallet_token_sell_orders.',
       'Signing runs in a subprocess worker; ordered txs broadcast (checker mint → taker tx). Returns the txids.',
       'The ask price + fees leave the bot\'s wallet irreversibly — confirm the listing with the owner before calling when ambiguous.',
-    ].join(' '),
-    {
+    ].join(' ');
+  const tokenTakeSchema = {
       sell_txid: z.string().min(1).describe('LIST txid (64 hex) from the listing tuple.'),
       sell_output_index: z.number().int().nonnegative().describe('Token output index in the LIST tx.'),
       sell_price_sats: z.number().int().positive().describe('Ask price in sats from the listing tuple (cross-checked on-chain).'),
@@ -1077,8 +1079,8 @@ export function buildWalletAgentTools(deps: {
       seed_txid: z.string().optional().describe('Seed utxo txid when the seed lives in a different tx than the LIST (optional).'),
       seed_vout: z.number().int().nonnegative().optional().describe('Seed output index (optional, default 0).'),
       receiver_address: z.string().optional().describe('Address receiving the tokens — defaults to this session bot\'s own address.'),
-    },
-    async (args: {
+    };
+  const tokenTakeHandler = async (args: {
       sell_txid: string;
       sell_output_index: number;
       sell_price_sats: number;
@@ -1089,15 +1091,15 @@ export function buildWalletAgentTools(deps: {
     }) => {
       const metabotId = resolveMetabotId(sessionId);
       if (metabotId == null) {
-        return textResult('wallet_token_take could not determine which MetaBot owns this session; takes must spend the session bot\'s own wallet.', true);
+        return textResult('wallet_token_buy could not determine which MetaBot owns this session; buys must spend the session bot\'s own wallet.', true);
       }
       const listing = buildTokenListingArg(args);
       if (!listing) {
-        return textResult('wallet_token_take: sell_txid must be 64 hex, sell_output_index a non-negative integer, sell_price_sats a positive integer, seller_address required.', true);
+        return textResult('wallet_token_buy: sell_txid must be 64 hex, sell_output_index a non-negative integer, sell_price_sats a positive integer, seller_address required.', true);
       }
       const receiverAddress = asString(args.receiver_address);
       if (receiverAddress && !looksLikeMvcAddress(receiverAddress)) {
-        return textResult('wallet_token_take: receiver_address must be a raw MVC address (tokens only transfer to addresses, not local bots).', true);
+        return textResult('wallet_token_buy: receiver_address must be a raw MVC address (tokens only transfer to addresses, not local bots).', true);
       }
       try {
         const result = await control.takeToken({
@@ -1106,7 +1108,7 @@ export function buildWalletAgentTools(deps: {
           receiverAddress: receiverAddress || (control.getMetabotMvcAddress(metabotId) ?? ''),
         });
         const lines = [
-          'TokenSell TAKE broadcast on-chain.',
+          'TokenSell TAKE broadcast on-chain (wallet_token_buy).',
           `- take txid: ${result.txId}`,
           `- funding txids: ${result.fundingTxIds.join(', ')}`,
           '- Verify the tokens arrived with wallet_token_balance after the txs confirm.',
@@ -1114,9 +1116,15 @@ export function buildWalletAgentTools(deps: {
         return textResult(lines.join('\n'));
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`wallet_token_take failed: ${msg}`, true);
+        return textResult('wallet_token_buy failed: ${msg}', true);
       }
-    }
+    };
+  const walletTokenBuy = tool('wallet_token_buy', tokenTakeDescription, tokenTakeSchema, tokenTakeHandler);
+  const walletTokenTakeAlias = tool(
+    'wallet_token_take',
+    'Alias of wallet_token_buy (verb alignment with the NFT line) — identical arguments and behavior; see wallet_token_buy.',
+    tokenTakeSchema,
+    tokenTakeHandler
   );
 
   const walletTokenCancelSell = tool(
@@ -1179,7 +1187,8 @@ export function buildWalletAgentTools(deps: {
     walletTokenBalance,
     walletTokenSellOrders,
     walletTokenSell,
-    walletTokenTake,
+    walletTokenBuy,
+    walletTokenTakeAlias,
     walletTokenCancelSell,
   ];
 }
