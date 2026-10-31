@@ -16,7 +16,14 @@ can list and take FT orders the same way they already trade NFTs:
 | `wallet_token_sell` | LIST | op=1 TRANSFER into a TokenSell seed lock |
 | `wallet_token_sell_orders` | read | verify a listing tuple against the chain |
 | `wallet_token_buy` | TAKE（buy/take 同义，动词与 NFT 线对齐） | op=2 UNLOCK_FROM_CONTRACT |
+| `wallet_token_take` | TAKE（**已弃用别名，仍可用**） | 与 `wallet_token_buy` 完全等价：同一 schema 对象、同一 handler |
 | `wallet_token_cancel_sell` | CANCEL | self-take (seller==taker; price circles back, fees spent) |
+
+**改名与兼容（take → buy）**：本能力以 `wallet_token_buy` 为正式名，
+`wallet_token_take` 作为**保留别名**继续注册（同一 schema 对象、同一 handler，
+行为逐字一致）。别名不删除：既有按 `wallet_token_take` 编写的调用方无需改动；
+新代码请使用 `wallet_token_buy`。若将来要移除别名，须作为破坏性变更单独发布
+并同步更新本节与 `tests/mvcTokenSell.test.mjs` 的别名断言。
 
 All signing runs in the subprocess worker
 (`src/main/libs/buildMvcTokenSellRawTxWorker.ts`, `ELECTRON_RUN_AS_NODE`, same

@@ -1065,15 +1065,14 @@ export function buildWalletAgentTools(deps: {
     }
   );
 
-  const walletTokenTake = tool(
-    'wallet_token_buy',
-    [
+  const tokenBuyDescription = [
       'wallet_token_buy — take (buy) an MVC FT TokenSell listing (op=2 UNLOCK_FROM_CONTRACT) with THIS session MetaBot\'s own wallet: pays the ask price to the seller and receives the tokens at the receiver address. Verb-aligned with wallet_nft_buy; TokenSell papers call this operation "take" — same thing.',
       'Pass the listing tuple (sell_txid + sell_output_index + sell_price_sats + seller_address; the price/seller are cross-checked against the on-chain seed lock before signing). Verify the listing first with wallet_token_sell_orders.',
       'Signing runs in a subprocess worker; ordered txs broadcast (checker mint → taker tx). Returns the txids.',
       'The ask price + fees leave the bot\'s wallet irreversibly — confirm the listing with the owner before calling when ambiguous.',
-    ].join(' '),
-    {
+      'wallet_token_take remains registered as a deprecated alias with identical arguments and behavior (the TokenSell papers call this verb \'take\').',
+    ].join(' ');
+  const tokenBuySchema = {
       sell_txid: z.string().min(1).describe('LIST txid (64 hex) from the listing tuple.'),
       sell_output_index: z.number().int().nonnegative().describe('Token output index in the LIST tx.'),
       sell_price_sats: z.number().int().positive().describe('Ask price in sats from the listing tuple (cross-checked on-chain).'),
@@ -1081,8 +1080,8 @@ export function buildWalletAgentTools(deps: {
       seed_txid: z.string().optional().describe('Seed utxo txid when the seed lives in a different tx than the LIST (optional).'),
       seed_vout: z.number().int().nonnegative().optional().describe('Seed output index (optional, default 0).'),
       receiver_address: z.string().optional().describe('Address receiving the tokens — defaults to this session bot\'s own address.'),
-    },
-    async (args: {
+    };
+  const tokenBuyHandler = async (args: {
       sell_txid: string;
       sell_output_index: number;
       sell_price_sats: number;
@@ -1120,7 +1119,14 @@ export function buildWalletAgentTools(deps: {
         const msg = error instanceof Error ? error.message : String(error);
         return textResult(`wallet_token_buy failed: ${msg}`, true);
       }
-    }
+    };
+  const walletTokenBuy = tool('wallet_token_buy', tokenBuyDescription, tokenBuySchema, tokenBuyHandler);
+  // Alias kept for compatibility with the merged surface: same schema object, same handler.
+  const walletTokenTakeAlias = tool(
+    'wallet_token_take',
+    'Alias of wallet_token_buy (verb alignment with the NFT line) — identical arguments and behavior; see wallet_token_buy.',
+    tokenBuySchema,
+    tokenBuyHandler
   );
 
   const walletTokenCancelSell = tool(
@@ -1183,7 +1189,8 @@ export function buildWalletAgentTools(deps: {
     walletTokenBalance,
     walletTokenSellOrders,
     walletTokenSell,
-    walletTokenTake,
+    walletTokenBuy,
+    walletTokenTakeAlias,
     walletTokenCancelSell,
   ];
 }
