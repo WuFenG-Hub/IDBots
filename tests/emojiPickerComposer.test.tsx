@@ -17,6 +17,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import EmojiMenuButton, { rememberRecent, restoreRecentChars } from '../src/renderer/components/chat/EmojiPickerPopover';
 import GroupTaskMessageItem from '../src/renderer/components/groupTasks/GroupTaskMessageItem';
 import A2AMessageItem from '../src/renderer/components/cowork/A2AMessageItem';
+import CoworkSentQuoteBlock from '../src/renderer/components/cowork/CoworkSentQuoteBlock';
 import { i18nService } from '../src/renderer/services/i18n';
 import type { GroupChatTranscriptMessage } from '../src/renderer/types/groupTask';
 
@@ -69,8 +70,8 @@ test('open picker renders one flat panel: search box, no tabs, single emoji grid
   assert.equal(imgCount, 85, `expected 85 Twemoji <img> cells, got ${imgCount}`);
   // Grid starts with the WeChat code-table order (微笑 first)…
   assert.match(markup, /<img[^>]*alt="🙂"/, 'grid starts with 🙂 (微笑) as a Twemoji image');
-  // …backed by the bundled asset (no runtime CDN URL anywhere).
-  assert.match(markup, /src="[^"]*twemoji\/1f642\.svg"/);
+  // …backed by the embedded data URI asset (bundler-independent; never a CDN).
+  assert.match(markup, /src="data:image\/svg\+xml,%3csvg/);
   assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be bundled, never fetched from a CDN');
   // The button's a11y identity stays the codepoint itself.
   assert.match(markup, /aria-label="🙂"/);
@@ -147,7 +148,7 @@ test('group-task message bubbles render WeChat bracket codes as Twemoji images (
   // Mapped codes render as inline Twemoji images; alt carries the codepoint.
   assert.match(markup, /<img[^>]*alt="👍"/, 'bubble should show 👍 (as an image) for [强]');
   assert.match(markup, /<img[^>]*alt="💪"/, 'bubble should show 💪 (as an image) for [奋斗]');
-  assert.match(markup, /src="[^"]*twemoji\/1f44d\.svg"/, '👍 maps to the bundled 1f44d.svg asset');
+  assert.match(markup, /src="data:image\/svg\+xml,%3csvg/, '👍 renders from the embedded data URI asset');
   assert.ok(!markup.includes('[强]') && !markup.includes('[奋斗]'), 'bracket codes must not leak into the bubble');
   // The raw pin id and txid still render verbatim (chain data untouched).
   assert.match(markup, /txid:/);
@@ -188,6 +189,52 @@ test('cowork user bubbles route their body through the display mapping', () => {
     /content=\{mapWechatBracketCodesForDisplay\(body\)\}[\s\S]{0,120}?emojiImages/,
     'UserMessageBody must pass its body through the display-only mapping and opt into Twemoji rendering',
   );
+});
+
+test('cowork assistant bubbles join the Twemoji pipeline in BOTH modes', () => {
+  // AssistantMessageItem is not exported; pin both render branches in the
+  // transcript source. Assistant mode (bubble) and professional mode (bare
+  // full-width) are the same logical bubble face — one without the prop would
+  // flip emoji back to system glyphs depending on the user's mode setting.
+  const source = readSource('../src/renderer/components/cowork/CoworkSessionDetail.tsx');
+  const wired = (source.match(/content=\{replyContent\}[\s\S]{0,200}?emojiImages/g) ?? []).length;
+  assert.equal(wired, 2, 'both assistant reply branches (bubble + professional) must pass emojiImages');
+});
+
+test('cowork sent-quote blocks render Twemoji like the bubble body around them', () => {
+  // The quote block renders INSIDE the user bubble, so it must follow the
+  // SAME display-only contract as the body beside it: WeChat bracket codes
+  // map to emoji AND catalog emoji render as bundled Twemoji images.
+  const markup = renderToStaticMarkup(
+    <CoworkSentQuoteBlock block={'> 引用上一条消息[微笑]\n\n后续正文'} />,
+  );
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'quoted excerpt should show 🙂 (mapped from [微笑]) as a Twemoji image');
+  assert.ok(!markup.includes('[微笑]'), 'bracket codes must not leak into the rendered quote');
+  const rawMarkup = renderToStaticMarkup(
+    <CoworkSentQuoteBlock block={'> 直接码点👍也走管线'} />,
+  );
+  assert.match(rawMarkup, /<img[^>]*alt="👍"/, 'a literal catalog char in the excerpt renders as Twemoji too');
+  assert.match(markup, /src="data:image\/svg\+xml,%3csvg/, 'the image must come from the embedded data URI asset');
+  assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be bundled, never fetched from a CDN');
+});
+
+test('bot-browser panel bubbles join the Twemoji pipeline (user = TwemojiText, assistant = emojiImages)', () => {
+  // PanelMessage is not exported; pin the three render branches in the panel
+  // source. The user bubble is a PLAIN-TEXT face (no markdown pass), so it
+  // must go through TwemojiText rather than the emojiImages remark prop.
+  const source = readSource('../src/renderer/features/botBrowser/BotBrowserCoworkPanel.tsx');
+  assert.match(
+    source,
+    /import TwemojiText from '\.\.\/\.\.\/components\/chat\/TwemojiText';/,
+    'panel must import the plain-text Twemoji renderer',
+  );
+  assert.match(
+    source,
+    /<TwemojiText text=\{message\.content\} \/>/,
+    'bot-browser user bubble must render through TwemojiText',
+  );
+  const wired = (source.match(/<MarkdownContent content=\{message\.content\} compact onOpenBotBrowserUri=\{onOpenUri\} emojiImages \/>/g) ?? []).length;
+  assert.equal(wired, 2, 'both bot-browser assistant branches (bubble + bare) must pass emojiImages');
 });
 
 test('emoji picker copy resolves in both shipped locales', () => {

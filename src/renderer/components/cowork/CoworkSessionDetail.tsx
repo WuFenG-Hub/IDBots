@@ -1894,8 +1894,11 @@ const AssistantMessageItem: React.FC<{
               className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle"
               data-message-id={message.id}
             >
+              {/* emojiImages: same display-only Twemoji pipeline as the user
+                  bubble — assistant narration renders catalog emoji identically. */}
               <MarkdownContent
                 content={replyContent}
+                emojiImages
                 className="prose dark:prose-invert max-w-none"
                 resolveLocalFilePath={resolveLocalFilePath}
                 onOpenLocalFile={onOpenLocalFile}
@@ -1936,8 +1939,10 @@ const AssistantMessageItem: React.FC<{
         ) : (
           // Professional mode: bare full-width text, actions in a flow row.
           <div className="dark:text-claude-darkText text-claude-text">
+            {/* Professional mode shares the display-only Twemoji pipeline. */}
             <MarkdownContent
               content={replyContent}
+              emojiImages
               className="prose dark:prose-invert max-w-none"
               resolveLocalFilePath={resolveLocalFilePath}
               onOpenLocalFile={onOpenLocalFile}

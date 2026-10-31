@@ -14,6 +14,7 @@
 import React from 'react';
 import { i18nService } from '../../services/i18n';
 import MarkdownContent from '../MarkdownContent';
+import { mapWechatBracketCodesForDisplay } from '../chat/wechatEmojiDisplay';
 
 interface CoworkSentQuoteBlockProps {
   /** The raw blockquote markdown (label + excerpt + optional truncation note). */
@@ -47,9 +48,13 @@ const CoworkSentQuoteBlock: React.FC<CoworkSentQuoteBlockProps> = ({ block, onJu
         : undefined}
       className={interactive ? 'cursor-pointer' : undefined}
     >
+      {/* Same display-only contract as the bubble body beside it: the excerpt
+          is message content, so WeChat bracket codes map to emoji and catalog
+          emoji render as bundled Twemoji — the stored text stays untouched. */}
       <MarkdownContent
-        content={block}
+        content={mapWechatBracketCodesForDisplay(block)}
         className="cowork-sent-quote-line max-w-none [overflow-wrap:anywhere]"
+        emojiImages
       />
     </div>
   );
