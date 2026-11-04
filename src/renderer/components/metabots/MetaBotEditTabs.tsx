@@ -36,6 +36,7 @@ import {
   removeAllowChatSkill,
 } from './allowChatSkills.ts';
 import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
+import MetaBotNftWalletModal from './MetaBotNftWalletModal';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
 import KnowledgeBasePanel from './KnowledgeBasePanel';
 import SurfSection from './SurfSection';
@@ -258,6 +259,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   onDelete,
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  // "Choose from NFTs" opens the existing NFT Wallet modal; the user taps
+  // 「用此 NFT 当头像」 on a tile and the main process writes the avatar
+  // snapshot (local row + on-chain info-pin) in one action.
+  const [nftAvatarModalOpen, setNftAvatarModalOpen] = useState(false);
   const [values, setValues] = useState<MetaBotEditValues>(() => buildInitialValues(initialValues));
   const [baseline, setBaseline] = useState<MetaBotEditValues>(() => buildInitialValues(initialValues));
   const [activeTab, setActiveTab] = useState<MetaBotEditTabKey>('basic');  const [savingTab, setSavingTab] = useState<MetaBotEditTabKey | null>(null);
@@ -421,6 +426,20 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  // The NFT picker already wrote the avatar (local row + on-chain sync) in the
+  // main process. Adopt the returned value into BOTH the live values and the
+  // baseline: the Basic tab must not look dirty after a change that already
+  // landed, and a later save must not re-publish the same avatar.
+  const handleNftAvatarUpdated = (updated: unknown) => {
+    const avatar = typeof (updated as { avatar?: unknown } | null)?.avatar === 'string'
+      ? (updated as { avatar: string }).avatar
+      : '';
+    if (!avatar) return;
+    setValues((prev) => ({ ...prev, avatar }));
+    setBaseline((prev) => ({ ...prev, avatar }));
+    setTabError('basic', '');
   };
 
   // Assignment model: bundled skills are implicitly available to every bot,
@@ -727,13 +746,26 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                 className="hidden"
                 onChange={handleAvatarFileChange}
               />
-              <button
-                type="button"
-                onClick={() => avatarInputRef.current?.click()}
-                className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                {i18nService.t('metabotAvatarUpload')}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => avatarInputRef.current?.click()}
+                  className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                >
+                  {i18nService.t('metabotAvatarUpload')}
+                </button>
+                {/* Avatar source #2: an NFT this bot actually holds. Disabled
+                    without a live bot row — the wallet queries the bot address. */}
+                <button
+                  type="button"
+                  data-slot="metabot-avatar-pick-nft"
+                  onClick={() => setNftAvatarModalOpen(true)}
+                  disabled={!metabot}
+                  className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {i18nService.t('metabotAvatarPickNft')}
+                </button>
+              </div>
               <p className={hintClass}>
                 {i18nService.t('metabotAvatarPlaceholder')}
               </p>
@@ -748,6 +780,13 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
               )}
             </div>
           </div>
+          {metabot && nftAvatarModalOpen && (
+            <MetaBotNftWalletModal
+              metabot={metabot}
+              onClose={() => setNftAvatarModalOpen(false)}
+              onAvatarUpdated={handleNftAvatarUpdated}
+            />
+          )}
         </div>
 
         <div className={rowClass}>

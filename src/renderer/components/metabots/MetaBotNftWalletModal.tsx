@@ -21,11 +21,13 @@ import {
   ArrowPathIcon,
   DocumentDuplicateIcon,
   PhotoIcon,
+  UserCircleIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 import {
+  buildNftAvatarImageRef,
   buildNftDetailRows,
   buildNftTileViewModel,
   buildNftTransferPayload,
@@ -78,6 +80,12 @@ interface FeeOption {
 interface MetaBotNftWalletModalProps {
   metabot: Metabot;
   onClose: () => void;
+  /**
+   * Called after "use this NFT as the avatar" landed (local row + chain sync
+   * already attempted by the main process). The editor uses it to refresh the
+   * avatar preview and its baseline without a second write.
+   */
+  onAvatarUpdated?: (metabot: unknown) => void;
 }
 
 const copyTextToClipboard = (value: string): void => {
@@ -86,7 +94,11 @@ const copyTextToClipboard = (value: string): void => {
   window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('tokenTransferTxIdCopied') }));
 };
 
-const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, onClose }) => {
+const showToast = (message: string): void => {
+  window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
+};
+
+const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, onClose, onAvatarUpdated }) => {
   const [activeTab, setActiveTab] = useState<NftKind>('mrc721');
   const [tabStates, setTabStates] = useState<Record<NftKind, TabState | undefined>>({
     mrc721: undefined,
@@ -95,6 +107,52 @@ const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, 
   // null = list; otherwise the detail/transfer subject.
   const [detailItem, setDetailItem] = useState<NftListItem | null>(null);
   const [transferOpen, setTransferOpen] = useState(false);
+  // "Use this NFT as the avatar": per-item in-flight key + a persistent,
+  // dismissible outcome line (a toast alone would vanish before the user
+  // reads the structured failure).
+  const [avatarBusyKey, setAvatarBusyKey] = useState('');
+  const [avatarNotice, setAvatarNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+
+  const applyNftAvatar = useCallback(async (item: NftListItem) => {
+    const imageRef = buildNftAvatarImageRef(item);
+    if (!imageRef) {
+      const message = i18nService.t('metabotNftAvatarNoArtwork');
+      setAvatarNotice({ tone: 'error', text: message });
+      showToast(message);
+      return;
+    }
+    setAvatarBusyKey(String(item.key));
+    setAvatarNotice(null);
+    try {
+      const response = await window.electron.metabot.setNftAvatar({ metabotId: metabot.id, imageRef });
+      if (!response?.success) {
+        // The main process returns a structured reason (too-large / non-image /
+        // fetch-failed / update-failed …) — show it verbatim, never a bare
+        // "failed".
+        const message = response?.error || i18nService.t('metabotNftAvatarFailed');
+        setAvatarNotice({ tone: 'error', text: message });
+        showToast(message);
+        return;
+      }
+      const bytes = response.avatar?.bytes;
+      const syncPending = response.sync && response.sync.success === false;
+      const message = [
+        typeof bytes === 'number'
+          ? `${i18nService.t('metabotNftAvatarApplied')} (${bytes.toLocaleString()} B)`
+          : i18nService.t('metabotNftAvatarApplied'),
+        syncPending ? i18nService.t('metabotNftAvatarSyncPending') : '',
+      ].filter(Boolean).join(' · ');
+      setAvatarNotice({ tone: 'success', text: message });
+      showToast(message);
+      onAvatarUpdated?.(response.metabot);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : i18nService.t('metabotNftAvatarFailed');
+      setAvatarNotice({ tone: 'error', text: message });
+      showToast(message);
+    } finally {
+      setAvatarBusyKey('');
+    }
+  }, [metabot.id, onAvatarUpdated]);
 
   const loadTab = useCallback(
     (kind: NftKind, force = false) => {
@@ -223,6 +281,30 @@ const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, 
           </div>
         </div>
 
+        {/* "Use this NFT as the avatar" outcome — persistent until dismissed. */}
+        {avatarNotice && (
+          <div
+            data-slot="metabot-nft-avatar-notice"
+            data-tone={avatarNotice.tone}
+            role={avatarNotice.tone === 'error' ? 'alert' : 'status'}
+            className={`flex items-start gap-2 border-b px-4 py-2 text-[12px] ${
+              avatarNotice.tone === 'success'
+                ? 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
+                : 'border-red-500/30 text-red-500 dark:text-red-400'
+            }`}
+          >
+            <span className="min-w-0 break-words">{avatarNotice.text}</span>
+            <button
+              type="button"
+              onClick={() => setAvatarNotice(null)}
+              className="ml-auto shrink-0 opacity-70 transition-opacity hover:opacity-100"
+              aria-label={i18nService.t('close')}
+            >
+              <XMarkIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Body */}
         {!detailItem && (
           <>
@@ -272,35 +354,54 @@ const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, 
               )}
               {tiles.length > 0 && (
                 <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
-                  {tiles.map((tile) => (
-                    <button
-                      key={tile.key}
-                      type="button"
-                      data-slot="metabot-nft-tile"
-                      onClick={() => {
-                        const item = tabState.items.find((candidate) => String(candidate.key) === tile.key);
-                        if (item) setDetailItem(item);
-                      }}
-                      className="overflow-hidden rounded-xl border text-left transition-shadow hover:shadow-md dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50"
-                    >
-                      <NftArtworkImage
-                        sources={tile.artworkSources}
-                        initials={tile.artworkInitials}
-                        alt={tile.title}
-                      />
-                      <div className="space-y-0.5 px-2 py-1.5">
-                        <div className="flex min-w-0 items-baseline gap-1">
-                          <span className="truncate text-xs font-semibold dark:text-claude-darkText text-claude-text">{tile.title}</span>
-                          {tile.badge && (
-                            <span className="shrink-0 font-mono text-[10px] text-claude-textSecondary dark:text-claude-darkTextSecondary">{tile.badge}</span>
-                          )}
-                        </div>
-                        <div className="truncate text-[10px] text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                          {tile.subtitle || '—'}
-                        </div>
+                  {tiles.map((tile) => {
+                    const item = tabState.items.find((candidate) => String(candidate.key) === tile.key);
+                    const busy = avatarBusyKey === tile.key;
+                    return (
+                      <div key={tile.key} className="group relative">
+                        <button
+                          type="button"
+                          data-slot="metabot-nft-tile"
+                          onClick={() => {
+                            if (item) setDetailItem(item);
+                          }}
+                          className="w-full overflow-hidden rounded-xl border text-left transition-shadow hover:shadow-md dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50"
+                        >
+                          <NftArtworkImage
+                            sources={tile.artworkSources}
+                            initials={tile.artworkInitials}
+                            alt={tile.title}
+                          />
+                          <div className="space-y-0.5 px-2 py-1.5">
+                            <div className="flex min-w-0 items-baseline gap-1">
+                              <span className="truncate text-xs font-semibold dark:text-claude-darkText text-claude-text">{tile.title}</span>
+                              {tile.badge && (
+                                <span className="shrink-0 font-mono text-[10px] text-claude-textSecondary dark:text-claude-darkTextSecondary">{tile.badge}</span>
+                              )}
+                            </div>
+                            <div className="truncate text-[10px] text-claude-textSecondary dark:text-claude-darkTextSecondary">
+                              {tile.subtitle || '—'}
+                            </div>
+                          </div>
+                        </button>
+                        {/* Sibling of the tile button (never nested): the per-item
+                            "use this NFT as the avatar" quick action. */}
+                        <button
+                          type="button"
+                          data-slot="metabot-nft-use-avatar"
+                          onClick={() => {
+                            if (item) void applyNftAvatar(item);
+                          }}
+                          disabled={busy}
+                          title={i18nService.t('metabotNftUseAsAvatar')}
+                          aria-label={`${i18nService.t('metabotNftUseAsAvatar')} — ${tile.title}`}
+                          className="absolute right-1.5 top-1.5 rounded-lg bg-black/55 p-1.5 text-white opacity-90 shadow transition-opacity hover:bg-black/75 hover:opacity-100 focus:opacity-100 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          <UserCircleIcon className="h-4 w-4" aria-hidden />
+                        </button>
                       </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -349,14 +450,28 @@ const MetaBotNftWalletModal: React.FC<MetaBotNftWalletModalProps> = ({ metabot, 
                     </div>
                   </div>
                 ))}
-                <button
-                  type="button"
-                  data-slot="metabot-nft-open-transfer"
-                  onClick={() => setTransferOpen(true)}
-                  className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-claude-accent px-4 py-2 text-sm font-medium text-claude-accentInk hover:opacity-90"
-                >
-                  {i18nService.t('metabotNftTransfer')}
-                </button>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    data-slot="metabot-nft-open-transfer"
+                    onClick={() => setTransferOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-claude-accent px-4 py-2 text-sm font-medium text-claude-accentInk hover:opacity-90"
+                  >
+                    {i18nService.t('metabotNftTransfer')}
+                  </button>
+                  <button
+                    type="button"
+                    data-slot="metabot-nft-detail-use-avatar"
+                    onClick={() => void applyNftAvatar(detailItem)}
+                    disabled={avatarBusyKey === String(detailItem.key)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border px-4 py-2 text-sm font-medium dark:text-claude-darkText text-claude-text transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-wait disabled:opacity-60"
+                  >
+                    <UserCircleIcon className="h-4 w-4" aria-hidden />
+                    {avatarBusyKey === String(detailItem.key)
+                      ? i18nService.t('metabotNftAvatarWorking')
+                      : i18nService.t('metabotNftUseAsAvatar')}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

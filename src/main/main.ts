@@ -230,6 +230,7 @@ import {
   transferMetabotMvcNft,
 } from './services/metabotNftService';
 import { registerMetabotNftIpcHandlers } from './services/metabotNftIpc';
+import { normalizeAvatarToDataUrl } from './utils/avatarNormalize';
 import { healNftCard } from './services/nftCardHealService';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
@@ -18427,6 +18428,11 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     getMetabotNftItems: (store, input) => getMetabotNftItems(store, input),
     transferMetabotMvcNft: (store, input) => transferMetabotMvcNft(store, input),
     transferMetabotMrc721: (store, input) => transferMetabotMrc721(store, input),
+    // "Use this NFT as the avatar": normalize the artwork reference to a
+    // data-URL snapshot in the main process, then reuse the exact
+    // metabot:update path (local write + avatar_blob + on-chain info-pin).
+    normalizeAvatar: (source) => normalizeAvatarToDataUrl(source),
+    updateMetabotAvatar: (metabotId, input) => updateMetaBotCore(metabotId, input, getMetabotManageDeps()),
   });
 
   // Chat NftCard heal channel: renderer-side fallback lookups for missing

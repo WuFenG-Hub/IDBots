@@ -65,6 +65,25 @@ const artworkInitials = (item) => {
   return base.slice(0, 2).toUpperCase();
 };
 
+/**
+ * Artwork reference a "use this NFT as the bot avatar" call should hand to the
+ * main process for one list item:
+ * - mrc721: the cover metafile reference (`metafile://<pinId>` or bare pinId);
+ * - metacontract: the https artwork link (`imgUrl`) when present, otherwise
+ *   the icon reference — same precedence the tile artwork uses.
+ * Returns '' when the item carries no usable artwork reference at all.
+ */
+export function buildNftAvatarImageRef(item) {
+  const imageRef = String(item?.imageRef || '').trim();
+  const imageUrl = String(item?.imageUrl || '').trim();
+  if (item?.kind === 'metacontract') {
+    if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
+    return imageRef || imageUrl;
+  }
+  if (imageRef) return imageRef;
+  return /^https?:\/\//i.test(imageUrl) ? imageUrl : '';
+}
+
 /** Tile view model: title, subtitle, badge and artwork candidates. */
 export function buildNftTileViewModel(item) {
   const kind = item?.kind === 'metacontract' ? 'metacontract' : 'mrc721';

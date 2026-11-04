@@ -1362,6 +1362,13 @@ contextBridge.exposeInMainWorld('electron', {
     setSetting: (id: number, key: string, value: string) => ipcRenderer.invoke('metabot:setSetting', id, key, value),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
+    /**
+     * "Use this NFT as the avatar" (NFT Wallet modal): main normalizes the
+     * metafile/pin/https reference into a data-URL snapshot and rides the
+     * existing metabot-update path. Returns a structured success/failure.
+     */
+    setNftAvatar: (input: { metabotId: number; imageRef: string }) =>
+      ipcRenderer.invoke('metabot:setNftAvatar', input),
   },
   dream: {
     getStatus: () => ipcRenderer.invoke('dream:getStatus'),
